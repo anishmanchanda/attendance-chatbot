@@ -462,7 +462,7 @@ app.post('/api/upload-images', upload.array('scheduleImages', 5), async (req, re
 
         res.json({
             success: true,
-            message: \`Successfully processed \${req.files.length} schedule images!\`,
+            message: `Successfully processed ${req.files.length} schedule images!`,
             analysis: analysis
         });
 
@@ -536,7 +536,7 @@ app.post('/api/ai-chat', async (req, res) => {
             };
             
             student = await attendanceService.registerStudent(testPhone, studentData);
-            res.json({ reply: aiResponse.message + \`<br><br><em>✅ AI completed registration!</em>\` });
+            res.json({ reply: aiResponse.message + `<br><br><em>✅ AI completed registration!</em>` });
         }
         else if (aiResponse.action === 'record_attendance') {
             if (!student) {
@@ -545,7 +545,7 @@ app.post('/api/ai-chat', async (req, res) => {
             }
 
             await attendanceService.recordAttendance(student._id, aiResponse.attendanceData);
-            res.json({ reply: aiResponse.message + \`<br><br><em>🧠 AI processed and saved!</em>\` });
+            res.json({ reply: aiResponse.message + `<br><br><em>🧠 AI processed and saved!</em>` });
         }
         else if (aiResponse.action === 'get_summary') {
             if (!student) {
@@ -555,23 +555,23 @@ app.post('/api/ai-chat', async (req, res) => {
 
             const summary = await attendanceService.getAttendanceSummary(student._id);
             
-            let summaryMessage = aiResponse.message + \`<br><br><strong>Summary:</strong><br>\`;
-            summaryMessage += \`Overall: \${summary.overall.present}/\${summary.overall.total} (\${summary.overall.percentage}%)<br><br>\`;
+            let summaryMessage = aiResponse.message + `<br><br><strong>Summary:</strong><br>`;
+            summaryMessage += `Overall: ${summary.overall.present}/${summary.overall.total} (${summary.overall.percentage}%)<br><br>`;
             
             for (const subject of summary.subjects) {
-                summaryMessage += \`• \${subject.name}: \${subject.present}/\${subject.total} (\${subject.percentage}%)<br>\`;
+                summaryMessage += `• ${subject.name}: ${subject.present}/${subject.total} (${subject.percentage}%)<br>`;
             }
             
             res.json({ reply: summaryMessage });
         }
         else {
-            res.json({ reply: aiResponse.message + \`<br><br><em>🧠 Pure AI response</em>\` });
+            res.json({ reply: aiResponse.message + `<br><br><em>🧠 Pure AI response</em>` });
         }
         
     } catch (error) {
         console.error('❌ AI Error:', error);
         res.status(500).json({ 
-            reply: \`AI Error: \${error.message}\` 
+            reply: `AI Error: ${error.message}` 
         });
     }
 });

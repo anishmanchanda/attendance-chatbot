@@ -1,8 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const connectDB = require('./config/config_db_Version2');
-const whatsappService = require('./services/services_whatsapp_Version1');
-const docProcessor = require('./services/services_docProcessor_Version2');
+const whatsappService = require('./services/services_whatsapp_Version2');
 const aiService = require('./services/services_aiService_Version2');
 const attendanceService = require('./services/services_attendanceService_Version2');
 const Student = require('./models/models_Student_Version2');
@@ -10,6 +9,7 @@ const { Schedule } = require('./models/models_Schedule_Version2');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const axios = require('axios');
 
 // Initialize Express app
 const app = express();
@@ -48,6 +48,121 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage });
+
+// GPT-4o Vision Service for WhatsApp image processing
+class VisionService {
+    constructor() {
+        this.apiKey = process.env.OPENAI_API_KEY;
+    }
+
+    encodeImageToBase64(filePath) {
+        const imageBuffer = fs.readFileSync(filePath);
+        return imageBuffer.toString('base64');
+    }
+
+    getMimeType(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp'
+        };
+        return mimeTypes[ext] || 'image/jpeg';
+    }
+
+    async analyzeScheduleImage(imagePath) {
+        try {
+            console.log(`🧠 Analyzing schedule image with GPT-4o Vision...`);
+
+            const base64Image = this.encodeImageToBase64(imagePath);
+            const mimeType = this.getMimeType(imagePath);
+
+            const response = await axios({
+                method: 'POST',
+                url: 'https://api.openai.com/v1/chat/completions',
+                headers: {
+                    'Authorization': `Bearer ${this.apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 120000,
+                data: {
+                    model: "gpt-4o",
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Analyze this schedule/timetable image and extract structured data.
+
+Extract:
+1. Student info (name, roll number, semester)
+2. Subject codes and full names  
+3. Weekly schedule with days and times
+
+NOTE: Ignore teacher codes - set room to null.
+
+Return JSON:
+{
+  "studentInfo": {
+    "name": "name or null",
+    "rollNumber": "roll or null", 
+    "semester": number or null
+  },
+  "subjects": [
+    {"code": "CS101", "name": "Computer Science", "credits": 3}
+  ],
+  "schedule": [
+    {
+      "day": "Monday",
+      "slots": [
+        {"subject": "CS101", "startTime": "09:00", "endTime": "10:00", "room": null}
+      ]
+    }
+  ],
+  "confidence": "high/medium/low"
+}`
+                                },
+                                {
+                                    type: "image_url",
+                                    image_url: {
+                                        url: `data:${mimeType};base64,${base64Image}`,
+                                        detail: "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens: 4000,
+                    temperature: 0.1
+                }
+            });
+
+            const result = response.data.choices[0].message.content;
+            
+            try {
+                return JSON.parse(result);
+            } catch (parseError) {
+                console.log('📝 Non-JSON response, extracting key info...');
+                return {
+                    studentInfo: { name: null, rollNumber: null, semester: null },
+                    subjects: [],
+                    schedule: [],
+                    extractedText: result,
+                    confidence: "medium"
+                };
+            }
+
+        } catch (error) {
+            console.error('❌ Vision API Error:', error.response?.data || error.message);
+            throw new Error(`Vision analysis failed: ${error.response?.data?.error?.message || error.message}`);
+        }
+    }
+}
+
+const visionService = new VisionService();
 
 // Initialize WhatsApp service
 whatsappService.init();
@@ -268,54 +383,115 @@ async function handleTextMessage(student, phoneNumber, text) {
 
 async function handleMediaMessage(student, phoneNumber, message) {
   try {
-    let mediaPath;
-    let mimetype;
-    
-    if (message.mediaUrl) {
-      // For WhatsApp Business API
-      const tempPath = path.join(__dirname, 'uploads', `${Date.now()}-file`);
-      fs.writeFileSync(tempPath, message.mediaUrl.buffer);
-      mediaPath = tempPath;
-      mimetype = message.mediaUrl.mimeType;
-    } else {
-      // For whatsapp-web.js
-      mediaPath = message.mediaPath;
-      mimetype = message.mimetype;
+    // Only process images for now
+    if (!message.type === 'image' && !message.media?.mimetype?.startsWith('image/')) {
+      await whatsappService.sendMessage(phoneNumber, 
+        "Please send your schedule as an image (JPG, PNG, etc.). PDF processing will be available soon!"
+      );
+      return;
     }
     
     await whatsappService.sendMessage(phoneNumber, 
-      "I received your document. Processing it now... This may take a moment."
+      "📷 I received your schedule image! Processing with AI... This may take a moment."
     );
+
+    // Save the media to a temporary file
+    let tempImagePath;
     
-    // Process the document
-    const extractedData = await docProcessor.processDocument(mediaPath, mimetype);
+    if (message.media && message.media.data) {
+      // From whatsapp-web.js
+      const buffer = Buffer.from(message.media.data, 'base64');
+      tempImagePath = path.join(__dirname, 'uploads', `whatsapp_${Date.now()}.jpg`);
+      fs.writeFileSync(tempImagePath, buffer);
+    } else {
+      // Fallback
+      throw new Error('No image data received');
+    }
+
+    console.log(`📷 Processing WhatsApp image: ${tempImagePath}`);
+
+    // Analyze with Vision API
+    const analysis = await visionService.analyzeScheduleImage(tempImagePath);
     
-    // Create or update student record
-    const updatedStudent = await attendanceService.registerStudent(phoneNumber, {
-      rollNumber: extractedData.rollNumber,
-      name: extractedData.name,
-      semester: extractedData.semester,
-      subjects: extractedData.subjects,
-      schedule: extractedData.schedule
-    });
+    console.log('🧠 Vision analysis result:', analysis);
+
+    // Create student data from analysis
+    const studentData = {
+      rollNumber: analysis.studentInfo?.rollNumber || 'WA' + Math.floor(Math.random() * 10000),
+      name: analysis.studentInfo?.name || 'WhatsApp Student',
+      semester: analysis.studentInfo?.semester || 5,
+      subjects: analysis.subjects || [],
+      schedule: analysis.schedule || []
+    };
+
+    // Register or update student
+    const updatedStudent = await attendanceService.registerStudent(phoneNumber, studentData);
     
-    // Send confirmation
-    await whatsappService.sendMessage(phoneNumber,
-      `✅ Your schedule has been processed successfully!\n\n` +
-      `Roll Number: ${extractedData.rollNumber}\n` +
-      `Semester: ${extractedData.semester}\n` +
-      `Subjects: ${extractedData.subjects.length}\n\n` +
-      `You can now report your daily attendance. Just tell me which classes you attended today.`
-    );
+    // Create or update schedule
+    const existingSchedule = await Schedule.findOne({ student: updatedStudent._id });
+    if (existingSchedule) {
+      existingSchedule.subjects = analysis.subjects || existingSchedule.subjects;
+      existingSchedule.timeSlots = analysis.schedule || existingSchedule.timeSlots;
+      await existingSchedule.save();
+    } else {
+      const newSchedule = new Schedule({
+        student: updatedStudent._id,
+        subjects: analysis.subjects || [],
+        timeSlots: analysis.schedule || []
+      });
+      await newSchedule.save();
+    }
+
+    // Send confirmation message
+    let confirmationMessage = `✅ *Schedule processed successfully!*\n\n`;
     
-    // Clean up the file if needed
-    fs.unlinkSync(mediaPath);
+    if (analysis.studentInfo?.name) {
+      confirmationMessage += `👤 Name: ${analysis.studentInfo.name}\n`;
+    }
+    if (analysis.studentInfo?.rollNumber) {
+      confirmationMessage += `🆔 Roll: ${analysis.studentInfo.rollNumber}\n`;
+    }
+    if (analysis.studentInfo?.semester) {
+      confirmationMessage += `📚 Semester: ${analysis.studentInfo.semester}\n`;
+    }
+    
+    confirmationMessage += `\n📊 Extracted Data:\n`;
+    confirmationMessage += `• ${analysis.subjects?.length || 0} subjects found\n`;
+    confirmationMessage += `• ${analysis.schedule?.reduce((total, day) => total + (day.slots?.length || 0), 0) || 0} time slots\n`;
+    confirmationMessage += `• Confidence: ${analysis.confidence}\n\n`;
+    
+    confirmationMessage += `🤖 *You're all set!* Now you can:\n`;
+    confirmationMessage += `• Report daily attendance\n`;
+    confirmationMessage += `• Type "attendance" for summary\n`;
+    confirmationMessage += `• Type "subjects" for details\n`;
+    confirmationMessage += `• Type "help" for more options`;
+
+    await whatsappService.sendMessage(phoneNumber, confirmationMessage);
+    
+    // Clean up the temporary file
+    if (fs.existsSync(tempImagePath)) {
+      fs.unlinkSync(tempImagePath);
+    }
     
   } catch (error) {
-    console.error('Error handling media message:', error);
+    logError('Media Message Handler', error);
+    
     await whatsappService.sendMessage(phoneNumber, 
-      "Sorry, I had trouble processing your document. Please make sure it's clear and contains your schedule information."
+      "❌ Sorry, I had trouble processing your schedule image. Please make sure:\n" +
+      "• The image is clear and readable\n" +
+      "• It contains your timetable/schedule\n" +
+      "• Try taking a new photo with good lighting\n\n" +
+      "Type 'help' if you need assistance!"
     );
+    
+    // Clean up any temporary files
+    try {
+      if (tempImagePath && fs.existsSync(tempImagePath)) {
+        fs.unlinkSync(tempImagePath);
+      }
+    } catch (cleanupError) {
+      console.error('File cleanup error:', cleanupError);
+    }
   }
 }
 
