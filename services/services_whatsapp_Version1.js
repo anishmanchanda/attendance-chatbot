@@ -1,120 +1,130 @@
-const axios = require('axios');
+const qrcode = require('qrcode-terminal');
+const { Client, MessageMedia } = require('whatsapp-web.js');
+const fs = require('fs');
+const path = require('path');
 
-class WhatsAppService {
-  constructor() {
-    this.apiVersion = 'v17.0';
-    this.phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    this.token = process.env.WHATSAPP_TOKEN;
-    this.baseUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}`;
-  }
+// Create WhatsApp client
+const client = new Client();
+let messageHandler = null;
 
-  async sendMessage(to, text) {
+// Generate QR code for login
+client.on('qr', (qr) => {
+    console.log('🔗 Scan this QR code with your WhatsApp app:');
+    qrcode.generate(qr, { small: true });
+    console.log('👆 Point your phone camera at the QR code above');
+});
+
+client.on('ready', () => {
+    console.log('✅ WhatsApp client is ready and connected!');
+    console.log('🤖 Your attendance bot is now active');
+});
+
+client.on('disconnected', (reason) => {
+    console.log('❌ WhatsApp client was disconnected:', reason);
+});
+
+// Handle incoming messages
+client.on('message', async (message) => {
     try {
-      const response = await axios({
-        method: 'POST',
-        url: `${this.baseUrl}/messages`,
-        headers: {
-          'Authorization': `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
-        },
-        data: {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: to,
-          type: 'text',
-          text: { body: text }
-        }
-      });
-      
-      return response.data;
-    } catch (error) {
-      console.error('Error sending WhatsApp message:', error.response?.data || error.message);
-      throw error;
-    }
-  }
-
-  async handleIncomingMessage(body) {
-    try {
-      // Extract the message data from the webhook
-      if (body.object === 'whatsapp_business_account') {
-        const entry = body.entry?.[0];
-        const changes = entry?.changes?.[0];
+        // Skip messages from groups or status updates
+        if (message.isGroup || message.isStatus) return;
         
-        if (changes?.value?.messages?.[0]) {
-          const message = changes.value.messages[0];
-          const from = message.from;
-          const messageText = message.text?.body;
-          const messageType = message.type;
-          
-          // Handle different message types
-          if (messageType === 'text') {
-            return {
-              type: 'text',
-              from,
-              content: messageText
-            };
-          } else if (messageType === 'image') {
-            const imageId = message.image.id;
-            // Get the image URL
-            const imageUrl = await this.getMediaUrl(imageId);
-            return {
-              type: 'image',
-              from,
-              mediaId: imageId,
-              mediaUrl: imageUrl
-            };
-          } else if (messageType === 'document') {
-            const documentId = message.document.id;
-            const documentUrl = await this.getMediaUrl(documentId);
-            return {
-              type: 'document',
-              from,
-              mediaId: documentId,
-              mediaUrl: documentUrl,
-              filename: message.document.filename
-            };
-          }
+        console.log(`📱 Received message from ${message.from}: ${message.body}`);
+        
+        // Process the message using our message handler
+        if (messageHandler) {
+            const processedMessage = await parseIncomingMessage(message);
+            await messageHandler(processedMessage);
         }
-      }
-      
-      return null;
     } catch (error) {
-      console.error('Error processing incoming message:', error);
-      throw error;
+        console.error("❌ Error processing message:", error);
+        await sendMessage(message.from, "Sorry, I encountered an error. Please try again later.");
     }
-  }
+});
 
-  async getMediaUrl(mediaId) {
-    try {
-      const response = await axios({
-        method: 'GET',
-        url: `https://graph.facebook.com/${this.apiVersion}/${mediaId}`,
-        headers: {
-          'Authorization': `Bearer ${this.token}`
+// Parse incoming message to standard format
+async function parseIncomingMessage(message) {
+    const processedMessage = {
+        from: message.from,
+        type: 'text',
+        content: message.body,
+        timestamp: new Date()
+    };
+
+    // Handle media messages (images, documents)
+    if (message.hasMedia) {
+        try {
+            const media = await message.downloadMedia();
+            
+            // Save media to temp file
+            const tempDir = path.join(__dirname, '..', 'uploads');
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
+            
+            const fileName = `${Date.now()}-${message.id.id}`;
+            const filePath = path.join(tempDir, fileName);
+            
+            // Write media data to file
+            fs.writeFileSync(filePath, media.data, 'base64');
+            
+            processedMessage.type = media.mimetype.startsWith('image/') ? 'image' : 'document';
+            processedMessage.mediaPath = filePath;
+            processedMessage.mimetype = media.mimetype;
+            
+            console.log(`📎 Saved media file: ${fileName}`);
+        } catch (error) {
+            console.error('❌ Error downloading media:', error);
         }
-      });
-      
-      const mediaUrl = response.data.url;
-      
-      // Download the media file
-      const mediaResponse = await axios({
-        method: 'GET',
-        url: mediaUrl,
-        headers: {
-          'Authorization': `Bearer ${this.token}`
-        },
-        responseType: 'arraybuffer'
-      });
-      
-      return {
-        buffer: mediaResponse.data,
-        mimeType: mediaResponse.headers['content-type']
-      };
-    } catch (error) {
-      console.error('Error getting media URL:', error);
-      throw error;
     }
-  }
+
+    return processedMessage;
 }
 
-module.exports = new WhatsAppService();
+// Send message to a phone number
+async function sendMessage(phoneNumber, messageText) {
+    try {
+        // Ensure phone number format is correct
+        const formattedNumber = phoneNumber.includes('@c.us') ? phoneNumber : `${phoneNumber}@c.us`;
+        
+        await client.sendMessage(formattedNumber, messageText);
+        console.log(`✅ Sent message to ${phoneNumber}: ${messageText.substring(0, 50)}...`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed to send message to ${phoneNumber}:`, error);
+        return false;
+    }
+}
+
+// Handle incoming messages from main app
+async function handleIncomingMessage(body) {
+    // This function is for WhatsApp Business API webhook
+    // For now, we'll focus on whatsapp-web.js
+    console.log('📨 Webhook message received:', body);
+    return null;
+}
+
+// Register message handler from main app
+function registerMessageHandler(handler) {
+    messageHandler = handler;
+    console.log('🔗 Message handler registered');
+}
+
+// Initialize WhatsApp connection
+function init() {
+    console.log('🚀 Initializing WhatsApp client...');
+    client.initialize();
+}
+
+// Get client status
+function getStatus() {
+    return client.info;
+}
+
+module.exports = { 
+    init, 
+    sendMessage, 
+    handleIncomingMessage, 
+    registerMessageHandler,
+    getStatus 
+};

@@ -1,6 +1,6 @@
-const Student = require('../models/Student');
-const { Schedule, Subject } = require('../models/Schedule');
-const AttendanceRecord = require('../models/Attendance');
+const Student = require('../models/models_Student_Version2');
+const { Schedule, Subject } = require('../models/models_Schedule_Version2');
+const AttendanceRecord = require('../models/models_Attendance_Version2');
 const moment = require('moment');
 
 class AttendanceService {

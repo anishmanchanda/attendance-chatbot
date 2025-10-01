@@ -1,11 +1,12 @@
 require('dotenv').config();
 const express = require('express');
-const connectDB = require('./config/db');
-const whatsappService = require('./services/whatsapp');
-const docProcessor = require('./services/docProcessor');
-const aiService = require('./services/aiService');
-const attendanceService = require('./services/attendanceService');
-const Student = require('./models/Student');
+const connectDB = require('./config/config_db_Version2');
+const whatsappService = require('./services/services_whatsapp_Version1');
+const docProcessor = require('./services/services_docProcessor_Version2');
+const aiService = require('./services/services_aiService_Version2');
+const attendanceService = require('./services/services_attendanceService_Version2');
+const Student = require('./models/models_Student_Version2');
+const { Schedule } = require('./models/models_Schedule_Version2');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
@@ -14,8 +15,24 @@ const multer = require('multer');
 const app = express();
 app.use(express.json());
 
-// Connect to MongoDB
-connectDB();
+// Add error logging
+const logError = (context, error) => {
+  console.error(`❌ [${context}] Error:`, error.message);
+  if (process.env.NODE_ENV === 'development') {
+    console.error('Stack trace:', error.stack);
+  }
+};
+
+// Add success logging
+const logSuccess = (context, message) => {
+  console.log(`✅ [${context}] ${message}`);
+};
+
+// Connect to MongoDB with error handling
+connectDB().catch(error => {
+  logError('Database', error);
+  process.exit(1);
+});
 
 // Set up storage for uploaded files
 const storage = multer.diskStorage({
@@ -33,7 +50,12 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // Initialize WhatsApp service
-// For WhatsApp Business API
+whatsappService.init();
+whatsappService.registerMessageHandler(async (message) => {
+  await processMessage(message);
+});
+
+// For WhatsApp Business API (for production use later)
 app.post('/webhook', async (req, res) => {
   try {
     // Verify the callback URL (needed for initial verification)
@@ -74,6 +96,8 @@ whatsappService.registerMessageHandler(async (message) => {
 async function processMessage(message) {
   try {
     const phoneNumber = message.from;
+    logSuccess('Message Processing', `Processing message from ${phoneNumber}`);
+    
     let student = await Student.findOne({ phoneNumber });
     
     // Process based on message type
@@ -82,8 +106,20 @@ async function processMessage(message) {
     } else if (message.type === 'image' || message.type === 'document') {
       await handleMediaMessage(student, phoneNumber, message);
     }
+    
+    logSuccess('Message Processing', `Successfully processed message from ${phoneNumber}`);
   } catch (error) {
-    console.error('Error processing message:', error);
+    logError('Message Processing', error);
+    
+    // Send a friendly error message to the user
+    try {
+      await whatsappService.sendMessage(message.from, 
+        "😅 Oops! I'm having a small technical issue. Please try again in a moment. " +
+        "If the problem continues, type 'help' for assistance."
+      );
+    } catch (sendError) {
+      logError('Error Recovery', sendError);
+    }
   }
 }
 
@@ -213,10 +249,20 @@ async function handleTextMessage(student, phoneNumber, text) {
     await whatsappService.sendMessage(phoneNumber, confirmationMessage);
     
   } catch (error) {
-    console.error('Error handling text message:', error);
-    await whatsappService.sendMessage(phoneNumber, 
-      "Sorry, I encountered an error processing your message. Please try again later."
-    );
+    logError('Text Message Handler', error);
+    
+    let errorMessage = "😔 I'm sorry, I had trouble understanding your message. ";
+    
+    // Provide specific help based on the error type
+    if (error.message.includes('schedule')) {
+      errorMessage += "It seems there's an issue with your schedule. Please try uploading it again.";
+    } else if (error.message.includes('attendance')) {
+      errorMessage += "There was a problem recording your attendance. Please try again.";
+    } else {
+      errorMessage += "Please type 'help' to see what I can do for you.";
+    }
+    
+    await whatsappService.sendMessage(phoneNumber, errorMessage);
   }
 }
 

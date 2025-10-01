@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node start.js",
+    "dev": "nodemon start.js",
+    "app": "node app_Version2.js"
   },
   "repository": {
     "type": "git",
@@ -28,6 +31,7 @@
     "multer": "^2.0.2",
     "openai": "^6.0.0",
     "pdf-parse": "^1.1.1",
+    "puppeteer": "^24.22.3",
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.34.4",
     "tesseract.js": "^6.0.1",
