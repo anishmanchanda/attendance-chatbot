@@ -11,7 +11,7 @@ const attendanceService = require('./services/services_attendanceService_Version
 const AIService = require('./services/services_aiService_Version2');
 const aiService = new AIService();
 const Student = require('./models/models_Student_Version2');
-const { Schedule } = require('./models/models_Schedule_Version2');
+const { Subject, Schedule } = require('./models/models_Schedule_Version2');
 
 const app = express();
 app.use(express.json());
@@ -144,10 +144,25 @@ Return JSON:
 
             const result = response.data.choices[0].message.content;
             
+            console.log('🔍 Vision API Response:', result.substring(0, 500) + '...');
+            
+            // Clean markdown code blocks from response
+            let cleanedResult = result.trim();
+            if (cleanedResult.startsWith('```json')) {
+                cleanedResult = cleanedResult.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+            } else if (cleanedResult.startsWith('```')) {
+                cleanedResult = cleanedResult.replace(/^```\s*/, '').replace(/\s*```$/, '');
+            }
+            
             try {
-                return JSON.parse(result);
+                const parsedResult = JSON.parse(cleanedResult);
+                console.log(`✅ Successfully parsed JSON! Found ${parsedResult.subjects?.length || 0} subjects`);
+                console.log('📅 Schedule structure:', JSON.stringify(parsedResult.schedule, null, 2));
+                return parsedResult;
             } catch (parseError) {
                 console.log('📝 Non-JSON response, extracting key info...');
+                console.log('❌ Parse error:', parseError.message);
+                console.log('🔢 Raw response:', result);
                 return {
                     studentInfo: { name: null, rollNumber: null, semester: null },
                     subjects: [],
@@ -176,6 +191,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/chat', (req, res) => {
+    console.log('📥 Chat route accessed');
     res.send(`
         <!DOCTYPE html>
         <html>
@@ -434,21 +450,91 @@ app.post('/api/upload-images', upload.array('scheduleImages', 5), async (req, re
             student = await attendanceService.registerStudent(testPhone, studentData);
             console.log('✅ Created student from vision analysis');
         } else {
-            // Update schedule
+            // First, create or find Subject documents
+            const subjectRefs = {};
+            if (analysis.subjects && Array.isArray(analysis.subjects)) {
+                for (const subjectData of analysis.subjects) {
+                    if (subjectData.code && subjectData.name) {
+                        // Try to find existing subject or create new one
+                        let subject = await Subject.findOne({ code: subjectData.code });
+                        if (!subject) {
+                            subject = new Subject({
+                                code: subjectData.code,
+                                name: subjectData.name,
+                                totalClasses: 0
+                            });
+                            await subject.save();
+                        }
+                        subjectRefs[subjectData.code] = subject._id;
+                    }
+                }
+            }
+
+            // Transform schedule structure for database
+            const transformedTimeSlots = [];
+            console.log('🔧 Transforming schedule...', JSON.stringify(analysis.schedule, null, 2));
+            console.log('📚 Available subject references:', Object.keys(subjectRefs));
+            
+            if (analysis.schedule && Array.isArray(analysis.schedule)) {
+                for (const daySchedule of analysis.schedule) {
+                    console.log(`📅 Processing day: ${daySchedule.day}, slots: ${daySchedule.slots?.length || 0}`);
+                    if (daySchedule.slots && Array.isArray(daySchedule.slots)) {
+                        for (const slot of daySchedule.slots) {
+                            if (slot.startTime && slot.endTime && slot.subject) {
+                                // Find the subject ObjectId
+                                const subjectCode = slot.subject;
+                                let matchedSubjectId = null;
+                                
+                                // First try exact match
+                                if (subjectRefs[subjectCode]) {
+                                    matchedSubjectId = subjectRefs[subjectCode];
+                                } else {
+                                    // Try fuzzy match (remove dashes, case insensitive)
+                                    const normalizedSlotCode = subjectCode.replace('-', '').toLowerCase();
+                                    for (const [refCode, refId] of Object.entries(subjectRefs)) {
+                                        const normalizedRefCode = refCode.replace('-', '').toLowerCase();
+                                        if (normalizedSlotCode === normalizedRefCode) {
+                                            matchedSubjectId = refId;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                console.log(`🔍 Slot: ${slot.subject} ${slot.startTime}-${slot.endTime}, found subject: ${matchedSubjectId ? 'YES' : 'NO'}`);
+                                
+                                if (matchedSubjectId) {
+                                    transformedTimeSlots.push({
+                                        day: daySchedule.day,
+                                        startTime: slot.startTime,
+                                        endTime: slot.endTime,
+                                        subject: matchedSubjectId
+                                    });
+                                } else {
+                                    console.log(`⚠️ No subject match found for: ${subjectCode}`);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Update schedule (subjects here are just for reference, the actual subjects are separate documents)
             const existingSchedule = await Schedule.findOne({ student: student._id });
             if (existingSchedule) {
                 existingSchedule.subjects = analysis.subjects || existingSchedule.subjects;
-                existingSchedule.timeSlots = analysis.schedule || existingSchedule.timeSlots;
+                existingSchedule.timeSlots = transformedTimeSlots;
+                existingSchedule.semester = analysis.studentInfo?.semester || existingSchedule.semester || 3;
                 await existingSchedule.save();
             } else {
                 const newSchedule = new Schedule({
                     student: student._id,
+                    semester: analysis.studentInfo?.semester || 3,
                     subjects: analysis.subjects || [],
-                    timeSlots: analysis.schedule || []
+                    timeSlots: transformedTimeSlots
                 });
                 await newSchedule.save();
             }
-            console.log('✅ Updated schedule from vision analysis');
+            console.log(`✅ Updated schedule: ${transformedTimeSlots.length} time slots, ${Object.keys(subjectRefs).length} subjects created`);
         }
 
         // Clean up files

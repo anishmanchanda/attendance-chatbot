@@ -61,7 +61,6 @@ app.get('/', (req, res) => {
 
 app.get('/chat', (req, res) => {
     res.send(`
-            res.send(`
         <!DOCTYPE html>
         <html>
         <head>
